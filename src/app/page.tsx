@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { supabase } from '@/lib/supabase';
@@ -26,6 +26,7 @@ export default function Home() {
   const [password, setPassword] = useState('');
   const [isSignUp, setIsSignUp] = useState(false);
   const [entriesExpanded, setEntriesExpanded] = useState(false);
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     const getSession = async () => {
@@ -53,6 +54,11 @@ export default function Home() {
     else setEntries(data || []);
   }, [user]);
 
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Load entries whenever we have a user session (on mount or after login)
   useEffect(() => {
     if (user) {
       fetchEntries();
@@ -88,7 +94,9 @@ export default function Home() {
     const imageUrls: string[] = [];
     for (const file of files) {
       const fileExt = file.name.split('.').pop();
-      const fileName = `${Date.now()}-${Math.random()}.${fileExt}`;
+      // Use crypto.randomUUID when available for stable deterministic length id, fallback to Math.random
+      const unique = (typeof crypto !== 'undefined' && 'randomUUID' in crypto) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+      const fileName = `${unique}.${fileExt}`;
       const { data, error } = await supabase.storage
         .from('images')
         .upload(`${user.id}/${fileName}`, file);
@@ -99,7 +107,8 @@ export default function Home() {
       const { data: urlData } = supabase.storage
         .from('images')
         .getPublicUrl(`${user.id}/${fileName}`);
-      imageUrls.push(urlData.publicUrl);
+      // Persist storage path rather than public URL to avoid policy/public config drift
+      imageUrls.push(`${user.id}/${fileName}`);
     }
 
     const { error } = await supabase
@@ -113,20 +122,52 @@ export default function Home() {
     }
   };
 
-  const exportCSV = () => {
-    const data = entries.map(e => ({ 'Medicine Name': e.medicine_name, 'Image Count': e.image_urls.length }));
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Entries');
-    XLSX.writeFile(wb, 'entries.csv');
+  const exportCSV = async () => {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Entries');
+
+    // Add headers
+    worksheet.columns = [
+      { header: 'Medicine Name', key: 'medicine_name', width: 30 },
+      { header: 'Image Count', key: 'image_count', width: 15 }
+    ];
+
+    // Add data
+    entries.forEach(entry => {
+      worksheet.addRow({
+        medicine_name: entry.medicine_name,
+        image_count: entry.image_urls.length
+      });
+    });
+
+    // Generate CSV and download
+    const buffer = await workbook.csv.writeBuffer();
+    const blob = new Blob([buffer], { type: 'text/csv' });
+    saveAs(blob, 'entries.csv');
   };
 
-  const exportXLSX = () => {
-    const data = entries.map(e => ({ 'Medicine Name': e.medicine_name, 'Image Count': e.image_urls.length }));
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Entries');
-    XLSX.writeFile(wb, 'entries.xlsx');
+  const exportXLSX = async () => {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Entries');
+
+    // Add headers
+    worksheet.columns = [
+      { header: 'Medicine Name', key: 'medicine_name', width: 30 },
+      { header: 'Image Count', key: 'image_count', width: 15 }
+    ];
+
+    // Add data
+    entries.forEach(entry => {
+      worksheet.addRow({
+        medicine_name: entry.medicine_name,
+        image_count: entry.image_urls.length
+      });
+    });
+
+    // Generate XLSX and download
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    saveAs(blob, 'entries.xlsx');
   };
 
   const exportZIP = async () => {
@@ -157,13 +198,55 @@ export default function Home() {
 
   const deleteEntry = async (id: string) => {
     if (!confirm('Are you sure you want to delete this entry?')) return;
-    const { error } = await supabase.from('entries').delete().eq('id', id);
-    if (error) console.error(error);
-    else fetchEntries();
+
+    // First, get the entry to know which images to delete
+    const { data: entry, error: fetchError } = await supabase
+      .from('entries')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (fetchError) {
+      console.error('Error fetching entry:', fetchError);
+      return;
+    }
+
+    // Delete images from storage
+    if (entry && entry.image_urls && entry.image_urls.length > 0) {
+      const { error: storageError } = await supabase.storage
+        .from('images')
+        .remove(entry.image_urls);
+      if (storageError) {
+        console.error('Error deleting image(s) from storage:', storageError);
+      }
+    }
+
+    // Delete the entry from database
+    const { error: deleteError } = await supabase.from('entries').delete().eq('id', id);
+    if (deleteError) {
+      console.error('Error deleting entry:', deleteError);
+    } else {
+      fetchEntries();
+    }
   };
 
   const clearAll = async () => {
     if (!confirm('Are you sure you want to delete all entries?')) return;
+
+    // Delete all images from storage first
+    if (entries.length > 0) {
+      const allPaths = entries.flatMap(e => e.image_urls || []);
+      if (allPaths.length > 0) {
+        const { error: storageError } = await supabase.storage
+          .from('images')
+          .remove(allPaths);
+        if (storageError) {
+          console.error('Error deleting image(s) from storage:', storageError);
+        }
+      }
+    }
+
+    // Delete all entries from database
     const { error } = await supabase.from('entries').delete().eq('user_id', user?.id);
     if (error) console.error(error);
     else setEntries([]);
@@ -204,7 +287,7 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen p-8 bg-gray-900 text-white">
+    <div className="min-h-screen p-8 bg-gray-900 text-white" suppressHydrationWarning>
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-2xl font-bold">Medicine Data Entry</h1>
         <button onClick={handleSignOut} className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">
@@ -226,7 +309,7 @@ export default function Home() {
 
         <div className="mb-4">
           <label className="block text-sm font-medium mb-2 text-white">Upload Images</label>
-          <div {...getRootProps()} className="border-2 border-dashed border-gray-500 p-4 rounded cursor-pointer bg-gray-700">
+          <div {...getRootProps()} className={`border-2 border-dashed border-gray-500 p-4 rounded cursor-pointer bg-gray-700 ${mounted ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200`}>
             <input {...getInputProps()} />
             {isDragActive ? (
               <p className="text-white">Drop the files here...</p>
@@ -235,7 +318,7 @@ export default function Home() {
             )}
           </div>
           {files.length > 0 && (
-            <p className="mt-2 text-white">{files.length} file(s) selected</p>
+            <p className="mt-2 text-white" suppressHydrationWarning>{files.length} file(s) selected</p>
           )}
         </div>
 
@@ -262,10 +345,11 @@ export default function Home() {
             <button
               onClick={() => setEntriesExpanded(!entriesExpanded)}
               className="text-xl font-semibold text-white hover:text-gray-300 flex items-center"
+              suppressHydrationWarning
             >
-              <span>Entries ({entries.length})</span>
+              <span>Entries ({mounted ? entries.length : 0})</span>
               <svg
-                className={`ml-2 w-5 h-5 transition-transform ${entriesExpanded ? 'rotate-180' : ''}`}
+                className={`ml-2 w-5 h-5 transition-transform ${entriesExpanded ? 'rotate-180' : ''} ${mounted ? 'opacity-100' : 'opacity-0'}`}
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -273,28 +357,38 @@ export default function Home() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
             </button>
-            {entries.length > 0 && (
+            {mounted && entries.length > 0 && (
               <button onClick={clearAll} className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">
                 Clear All
               </button>
             )}
           </div>
-          {entriesExpanded && entries.map((entry) => (
-            <div key={entry.id} className="bg-gray-800 p-4 rounded shadow mb-4">
-              <p className="text-white"><strong>Medicine Name:</strong> {entry.medicine_name}</p>
-              <p className="text-white"><strong>Images:</strong> {entry.image_urls.length}</p>
-              <div className="flex flex-wrap mt-2">
-                {entry.image_urls.slice(0, 3).map((img, idx) => (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img key={idx} src={img} alt={`Image ${idx + 1}`} className="w-20 h-20 object-cover mr-2 mb-2" />
-                ))}
-                {entry.image_urls.length > 3 && <p className="text-white">+{entry.image_urls.length - 3} more</p>}
-              </div>
-              <button onClick={() => deleteEntry(entry.id)} className="mt-2 bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700">
-                Delete
-              </button>
+          {entriesExpanded && (
+            <div className={`${mounted ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200`}>
+              {entries.map((entry) => (
+                <div key={entry.id} className="bg-gray-800 p-4 rounded shadow mb-4">
+                  <p className="text-white"><strong>Medicine Name:</strong> {entry.medicine_name}</p>
+                  <p className="text-white"><strong>Images:</strong> {entry.image_urls.length}</p>
+                  <div className="flex flex-wrap mt-2">
+                    {entry.image_urls.slice(0, 3).map((img, idx) => (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        key={idx}
+                        src={supabase.storage.from('images').getPublicUrl(img).data.publicUrl}
+                        alt={`Image ${idx + 1}`}
+                        className="w-20 h-20 object-cover mr-2 mb-2"
+                      />
+                    ))}
+                    {entry.image_urls.length > 3 && <p className="text-white">+{entry.image_urls.length - 3} more</p>}
+                  </div>
+                  <button onClick={() => deleteEntry(entry.id)} className="mt-2 bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700">
+                    Delete
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
+
         </div>
       </div>
     </div>
