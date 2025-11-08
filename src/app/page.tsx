@@ -25,8 +25,12 @@ export default function Home() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isSignUp, setIsSignUp] = useState(false);
-  const [entriesExpanded, setEntriesExpanded] = useState(false);
-  const [mounted, setMounted] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [editingEntry, setEditingEntry] = useState<Entry | null>(null);
+  const [editText, setEditText] = useState('');
+  const [editFiles, setEditFiles] = useState<File[]>([]);
+  const [notification, setNotification] = useState<{message: string; type: 'success' | 'error'} | null>(null);
+  const [entriesExpanded, setEntriesExpanded] = useState(true);
 
   useEffect(() => {
     const getSession = async () => {
@@ -54,9 +58,14 @@ export default function Home() {
     else setEntries(data || []);
   }, [user]);
 
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  const showNotification = (message: string, type: 'success' | 'error') => {
+    setNotification({ message, type });
+    setTimeout(() => setNotification(null), 3000); // Auto-hide after 3 seconds
+  };
+
+  const filteredEntries = entries.filter(entry =>
+    entry.medicine_name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
 
   // Load entries whenever we have a user session (on mount or after login)
   useEffect(() => {
@@ -82,15 +91,15 @@ export default function Home() {
   };
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
-    setFiles(prevFiles => [...prevFiles, ...acceptedFiles]);
+    setFiles(acceptedFiles);
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop });
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const addMoreInputRef = useRef<HTMLInputElement>(null);
 
   const handleAddMoreClick = () => {
-    fileInputRef.current?.click();
+    addMoreInputRef.current?.click();
   };
 
   const handleAddMoreFiles = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -127,11 +136,14 @@ export default function Home() {
     const { error } = await supabase
       .from('entries')
       .insert([{ user_id: user.id, medicine_name: text, image_urls: imageUrls }]);
-    if (error) console.error(error);
-    else {
+    if (error) {
+      console.error(error);
+      showNotification('Upload unsuccessful', 'error');
+    } else {
       setText('');
       setFiles([]);
       fetchEntries();
+      showNotification('Upload successful', 'success');
     }
   };
 
@@ -238,8 +250,10 @@ export default function Home() {
     const { error: deleteError } = await supabase.from('entries').delete().eq('id', id);
     if (deleteError) {
       console.error('Error deleting entry:', deleteError);
+      showNotification('Delete unsuccessful', 'error');
     } else {
       fetchEntries();
+      showNotification('Delete successful', 'success');
     }
   };
 
@@ -261,8 +275,74 @@ export default function Home() {
 
     // Delete all entries from database
     const { error } = await supabase.from('entries').delete().eq('user_id', user?.id);
-    if (error) console.error(error);
-    else setEntries([]);
+    if (error) {
+      console.error(error);
+      showNotification('Clear all unsuccessful', 'error');
+    } else {
+      setEntries([]);
+      showNotification('Clear all successful', 'success');
+    }
+  };
+
+  const startEditing = (entry: Entry) => {
+    setEditingEntry(entry);
+    setEditText(entry.medicine_name);
+    setEditFiles([]);
+  };
+
+  const cancelEditing = () => {
+    setEditingEntry(null);
+    setEditText('');
+    setEditFiles([]);
+  };
+
+  const removeImageFromEntry = (imagePath: string) => {
+    if (!editingEntry) return;
+    setEditingEntry({
+      ...editingEntry,
+      image_urls: editingEntry.image_urls.filter(url => url !== imagePath)
+    });
+  };
+
+  const saveEditedEntry = async () => {
+    if (!editingEntry || !editText.trim()) return;
+
+    const newImageUrls: string[] = [...editingEntry.image_urls];
+
+    // Upload new images
+    for (const file of editFiles) {
+      const fileExt = file.name.split('.').pop();
+      const unique = (typeof crypto !== 'undefined' && 'randomUUID' in crypto) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+      const fileName = `${unique}.${fileExt}`;
+      const { data, error } = await supabase.storage
+        .from('images')
+        .upload(`${user!.id}/${fileName}`, file);
+      if (error) {
+        console.error(error);
+        continue;
+      }
+      newImageUrls.push(`${user!.id}/${fileName}`);
+    }
+
+    // Update the entry
+    const { error } = await supabase
+      .from('entries')
+      .update({ 
+        medicine_name: editText,
+        image_urls: newImageUrls 
+      })
+      .eq('id', editingEntry.id);
+
+    if (error) {
+      console.error(error);
+      showNotification('Update unsuccessful', 'error');
+    } else {
+      setEditingEntry(null);
+      setEditText('');
+      setEditFiles([]);
+      fetchEntries();
+      showNotification('Update successful', 'success');
+    }
   };
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white">Loading...</div>;
@@ -301,6 +381,13 @@ export default function Home() {
 
   return (
     <div className="min-h-screen p-8 bg-gray-900 text-white" suppressHydrationWarning>
+      {notification && (
+        <div className={`fixed top-4 right-4 z-50 p-4 rounded shadow-lg ${
+          notification.type === 'success' ? 'bg-green-600' : 'bg-red-600'
+        } text-white`}>
+          {notification.message}
+        </div>
+      )}
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-2xl font-bold">Medicine Data Entry</h1>
         <button onClick={handleSignOut} className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">
@@ -322,7 +409,7 @@ export default function Home() {
 
         <div className="mb-4">
           <label className="block text-sm font-medium mb-2 text-white">Upload Images</label>
-          <div {...getRootProps()} className={`border-2 border-dashed border-gray-500 p-4 rounded cursor-pointer bg-gray-700 ${mounted ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200`}>
+          <div {...getRootProps()} className="border-2 border-dashed border-gray-500 p-4 rounded cursor-pointer bg-gray-700">
             <input {...getInputProps()} />
             {isDragActive ? (
               <p className="text-white">Drop the files here...</p>
@@ -332,29 +419,14 @@ export default function Home() {
           </div>
           <input
             type="file"
-            ref={fileInputRef}
+            ref={addMoreInputRef}
             onChange={handleAddMoreFiles}
             multiple
-            accept="image/*"
             style={{ display: 'none' }}
           />
           {files.length > 0 && (
             <div className="mt-2">
-              <p className="text-white" suppressHydrationWarning>{files.length} file(s) selected</p>
-              <div className="flex flex-wrap gap-2 mt-2">
-                {files.map((file, index) => (
-                  <div key={index} className="bg-gray-600 px-2 py-1 rounded text-sm text-white flex items-center">
-                    <span className="truncate max-w-32">{file.name}</span>
-                    <button
-                      type="button"
-                      onClick={() => setFiles(files.filter((_, i) => i !== index))}
-                      className="ml-2 text-red-400 hover:text-red-300"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
+              <p className="text-white">{files.length} file(s) selected</p>
               <button
                 type="button"
                 onClick={handleAddMoreClick}
@@ -391,9 +463,9 @@ export default function Home() {
               className="text-xl font-semibold text-white hover:text-gray-300 flex items-center"
               suppressHydrationWarning
             >
-              <span>Entries ({mounted ? entries.length : 0})</span>
+              <span>Entries ({filteredEntries.length})</span>
               <svg
-                className={`ml-2 w-5 h-5 transition-transform ${entriesExpanded ? 'rotate-180' : ''} ${mounted ? 'opacity-100' : 'opacity-0'}`}
+                className={`ml-2 w-5 h-5 transition-transform ${entriesExpanded ? 'rotate-180' : ''}`}
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -401,36 +473,118 @@ export default function Home() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
             </button>
-            {mounted && entries.length > 0 && (
+            {entries.length > 0 && (
               <button onClick={clearAll} className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700">
                 Clear All
               </button>
             )}
           </div>
           {entriesExpanded && (
-            <div className={`${mounted ? 'opacity-100' : 'opacity-0'} transition-opacity duration-200`}>
-              {entries.map((entry) => (
-                <div key={entry.id} className="bg-gray-800 p-4 rounded shadow mb-4">
-                  <p className="text-white"><strong>Medicine Name:</strong> {entry.medicine_name}</p>
-                  <p className="text-white"><strong>Images:</strong> {entry.image_urls.length}</p>
-                  <div className="flex flex-wrap mt-2">
-                    {entry.image_urls.slice(0, 3).map((img, idx) => (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        key={idx}
-                        src={supabase.storage.from('images').getPublicUrl(img).data.publicUrl}
-                        alt={`Image ${idx + 1}`}
-                        className="w-20 h-20 object-cover mr-2 mb-2"
-                      />
-                    ))}
-                    {entry.image_urls.length > 3 && <p className="text-white">+{entry.image_urls.length - 3} more</p>}
+            <>
+              <div className="mb-4">
+                <input
+                  type="text"
+                  placeholder="Search entries by medicine name..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full p-2 border border-gray-600 rounded bg-gray-700 text-white placeholder-gray-400"
+                />
+              </div>
+              <div className="transition-opacity duration-200">
+                {filteredEntries.map((entry) => (
+                  <div key={entry.id} className="bg-gray-800 p-4 rounded shadow mb-4">
+                    {editingEntry?.id === entry.id ? (
+                      // Edit mode
+                      <div>
+                        <div className="mb-4">
+                          <label className="block text-sm font-medium mb-2 text-white">Medicine Name</label>
+                          <input
+                            type="text"
+                            value={editText}
+                            onChange={(e) => setEditText(e.target.value)}
+                            className="w-full p-2 border border-gray-600 rounded bg-gray-700 text-white"
+                          />
+                        </div>
+                        <div className="mb-4">
+                          <label className="block text-sm font-medium mb-2 text-white">Current Images</label>
+                          <div className="flex flex-wrap gap-2 mb-2">
+                            {editingEntry.image_urls.map((img, idx) => (
+                              <div key={idx} className="relative">
+                                <img
+                                  src={supabase.storage.from('images').getPublicUrl(img).data.publicUrl}
+                                  alt={`Image ${idx + 1}`}
+                                  className="w-20 h-20 object-cover rounded"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => removeImageFromEntry(img)}
+                                  className="absolute -top-2 -right-2 bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs hover:bg-red-700"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mb-2">
+                            <input
+                              type="file"
+                              onChange={(e) => setEditFiles(Array.from(e.target.files || []))}
+                              multiple
+                              className="text-white"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={saveEditedEntry}
+                            className="bg-green-600 text-white px-3 py-1 rounded hover:bg-green-700"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={cancelEditing}
+                            className="bg-gray-600 text-white px-3 py-1 rounded hover:bg-gray-700"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      // View mode
+                      <>
+                        <p className="text-white"><strong>Medicine Name:</strong> {entry.medicine_name}</p>
+                        <p className="text-white"><strong>Images:</strong> {entry.image_urls.length}</p>
+                        <div className="flex flex-wrap mt-2">
+                          {entry.image_urls.slice(0, 3).map((img, idx) => (
+                            <img
+                              key={idx}
+                              src={supabase.storage.from('images').getPublicUrl(img).data.publicUrl}
+                              alt={`Image ${idx + 1}`}
+                              className="w-20 h-20 object-cover mr-2 mb-2"
+                            />
+                          ))}
+                          {entry.image_urls.length > 3 && <p className="text-white">+{entry.image_urls.length - 3} more</p>}
+                        </div>
+                        <div className="flex gap-2 mt-2">
+                          <button
+                            onClick={() => startEditing(entry)}
+                            className="bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700"
+                          >
+                            Edit
+                          </button>
+                          <button onClick={() => deleteEntry(entry.id)} className="bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700">
+                            Delete
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
-                  <button onClick={() => deleteEntry(entry.id)} className="mt-2 bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700">
-                    Delete
-                  </button>
-                </div>
-              ))}
-            </div>
+                ))}
+                {filteredEntries.length === 0 && searchTerm && (
+                  <p className="text-gray-400 text-center py-4">No entries found matching "{searchTerm}"</p>
+                )}
+              </div>
+            </>
           )}
 
         </div>
