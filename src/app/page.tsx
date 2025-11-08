@@ -76,6 +76,46 @@ export default function Home() {
     }
   }, [user, fetchEntries]);
 
+  // Handle paste events for images
+  useEffect(() => {
+    const handlePaste = async (event: ClipboardEvent) => {
+      // Only handle paste if we're not in an input field
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      const items = event.clipboardData?.items;
+      if (!items) return;
+
+      const imageFiles: File[] = [];
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.type.indexOf('image') !== -1) {
+          const file = item.getAsFile();
+          if (file) {
+            // Generate a unique filename for pasted images
+            const timestamp = Date.now();
+            const extension = file.type.split('/')[1] || 'png';
+            const uniqueName = `pasted-image-${timestamp}-${i}.${extension}`;
+            
+            // Create a new File object with the unique name
+            const renamedFile = new File([file], uniqueName, { type: file.type });
+            imageFiles.push(renamedFile);
+          }
+        }
+      }
+
+      if (imageFiles.length > 0) {
+        setFiles(prevFiles => [...prevFiles, ...imageFiles]);
+        event.preventDefault(); // Prevent default paste behavior
+      }
+    };
+
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, []);
+
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -91,10 +131,13 @@ export default function Home() {
   };
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
-    setFiles(acceptedFiles);
+    setFiles(prevFiles => [...prevFiles, ...acceptedFiles]);
   }, []);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop });
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({ 
+    onDrop,
+    multiple: true
+  });
 
   const addMoreInputRef = useRef<HTMLInputElement>(null);
 
@@ -107,6 +150,10 @@ export default function Home() {
     setFiles(prevFiles => [...prevFiles, ...selectedFiles]);
     // Reset the input value so the same file can be selected again if needed
     event.target.value = '';
+  };
+
+  const removeFile = (indexToRemove: number) => {
+    setFiles(prevFiles => prevFiles.filter((_, index) => index !== indexToRemove));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -414,7 +461,7 @@ export default function Home() {
             {isDragActive ? (
               <p className="text-white">Drop the files here...</p>
             ) : (
-              <p className="text-white">Drag &apos;n&apos; drop some files here, or click to select files</p>
+              <p className="text-white">Drag &apos;n&apos; drop some files here, paste images (Ctrl+V), or click to select files</p>
             )}
           </div>
           <input
@@ -425,12 +472,33 @@ export default function Home() {
             style={{ display: 'none' }}
           />
           {files.length > 0 && (
-            <div className="mt-2">
-              <p className="text-white">{files.length} file(s) selected</p>
+            <div className="mt-4">
+              <p className="text-white mb-2">{files.length} file(s) selected</p>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-4">
+                {files.map((file, index) => (
+                  <div key={index} className="relative bg-gray-700 p-2 rounded">
+                    <img
+                      src={URL.createObjectURL(file)}
+                      alt={file.name}
+                      className="w-full h-20 object-cover rounded"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeFile(index)}
+                      className="absolute -top-2 -right-2 bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs hover:bg-red-700"
+                    >
+                      ×
+                    </button>
+                    <p className="text-xs text-gray-300 mt-1 truncate" title={file.name}>
+                      {file.name}
+                    </p>
+                  </div>
+                ))}
+              </div>
               <button
                 type="button"
                 onClick={handleAddMoreClick}
-                className="mt-2 bg-gray-600 text-white px-3 py-1 rounded hover:bg-gray-500 text-sm"
+                className="bg-gray-600 text-white px-3 py-1 rounded hover:bg-gray-500 text-sm"
               >
                 Add more images
               </button>
