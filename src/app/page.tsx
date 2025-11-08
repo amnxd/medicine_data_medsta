@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
@@ -82,10 +82,23 @@ export default function Home() {
   };
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
-    setFiles(acceptedFiles);
+    setFiles(prevFiles => [...prevFiles, ...acceptedFiles]);
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop });
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAddMoreClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleAddMoreFiles = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(event.target.files || []);
+    setFiles(prevFiles => [...prevFiles, ...selectedFiles]);
+    // Reset the input value so the same file can be selected again if needed
+    event.target.value = '';
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -317,8 +330,39 @@ export default function Home() {
               <p className="text-white">Drag &apos;n&apos; drop some files here, or click to select files</p>
             )}
           </div>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleAddMoreFiles}
+            multiple
+            accept="image/*"
+            style={{ display: 'none' }}
+          />
           {files.length > 0 && (
-            <p className="mt-2 text-white" suppressHydrationWarning>{files.length} file(s) selected</p>
+            <div className="mt-2">
+              <p className="text-white" suppressHydrationWarning>{files.length} file(s) selected</p>
+              <div className="flex flex-wrap gap-2 mt-2">
+                {files.map((file, index) => (
+                  <div key={index} className="bg-gray-600 px-2 py-1 rounded text-sm text-white flex items-center">
+                    <span className="truncate max-w-32">{file.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => setFiles(files.filter((_, i) => i !== index))}
+                      className="ml-2 text-red-400 hover:text-red-300"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={handleAddMoreClick}
+                className="mt-2 bg-gray-600 text-white px-3 py-1 rounded hover:bg-gray-500 text-sm"
+              >
+                Add more images
+              </button>
+            </div>
           )}
         </div>
 
